@@ -510,6 +510,39 @@ func add_chunked(mesh: Mesh, xforms: Array, cols: Array, range_end: float, shado
 		add_multimesh(mesh, buckets[key][0], buckets[key][1], range_end, shadows)
 
 
+const MAX_MODEL_TRIS := 25000
+var models_ok := 0
+var models_skipped := 0
+var model_nodes: Array = []
+var show_models := true
+
+
+func mesh_tris(m: Mesh) -> int:
+	var n := 0
+	if m is ArrayMesh:
+		var am := m as ArrayMesh
+		for i in am.get_surface_count():
+			var il := am.surface_get_array_index_len(i)
+			if il <= 0:
+				il = am.surface_get_array_len(i)
+			n += il / 3
+	return n
+
+
+func usable(parts: Array, path: String) -> bool:
+	if parts.is_empty():
+		return false
+	var n := 0
+	for part in parts:
+		n += mesh_tris(part[0])
+	if n > MAX_MODEL_TRIS:
+		models_skipped += 1
+		print("Skipping heavy model ", path, " (", n, " triangles)")
+		return false
+	models_ok += 1
+	return true
+
+
 func mesh_parts(path: String) -> Array:
 	var out: Array = []
 	if not ResourceLoader.exists(path):
@@ -546,13 +579,14 @@ func scatter_models(parts_list: Array, xforms_per_model: Dictionary, range_end: 
 				var pt: Transform3D = part[1]
 				mi.transform = tt * pt
 				mi.visibility_range_end = range_end
-				mi.lod_bias = 0.5
+				mi.lod_bias = 0.3
 				if shadows:
 					mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 				else:
 					mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 				add_child(mi)
 				ranged.append([mi, range_end])
+				model_nodes.append(mi)
 
 
 # =====================================================================
@@ -699,7 +733,7 @@ func build_trees() -> void:
 	var parts_list: Array = []
 	for mp in model_list("trees"):
 		var parts := mesh_parts(mp)
-		if not parts.is_empty():
+		if usable(parts, mp):
 			parts_list.append(parts)
 	var pine := make_pine()
 	var pine_x: Array = []
@@ -753,7 +787,7 @@ func build_rocks() -> void:
 	var parts_list: Array = []
 	for mp in model_list("rocks"):
 		var parts := mesh_parts(mp)
-		if not parts.is_empty():
+		if usable(parts, mp):
 			parts_list.append(parts)
 	var rock := make_rock()
 	rock.surface_set_material(0, pbr_mat("rock", Color(0.34, 0.33, 0.31), 0.6))
@@ -788,7 +822,7 @@ func build_plants() -> void:
 	var parts_list: Array = []
 	for mp in model_list("plants"):
 		var parts := mesh_parts(mp)
-		if not parts.is_empty():
+		if usable(parts, mp):
 			parts_list.append(parts)
 	if parts_list.is_empty():
 		return
@@ -1395,7 +1429,7 @@ func set_btn_on(id: String, on: bool) -> void:
 func mk_menu_button(txt: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.text = txt
-	b.custom_minimum_size = Vector2(360, 52)
+	b.custom_minimum_size = Vector2(360, 46)
 	b.add_theme_font_size_override("font_size", 22)
 	if font != null:
 		b.add_theme_font_override("font", font)
@@ -1432,7 +1466,7 @@ func build_ui() -> void:
 	# HUD
 	lbl_status = mk_label("", 18)
 	hud.add_child(lbl_status)
-	lbl_fps = mk_label("", 14)
+	lbl_fps = mk_label("", 15)
 	hud.add_child(lbl_fps)
 	lbl_obj = mk_label("", 22)
 	lbl_obj.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1479,7 +1513,7 @@ func build_ui() -> void:
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 12)
 	var right := VBoxContainer.new()
-	right.add_theme_constant_override("separation", 10)
+	right.add_theme_constant_override("separation", 7)
 	menu_box.add_child(left)
 	menu_box.add_child(right)
 	var title := mk_label("DEAD VILLAGE", 64)
@@ -1504,11 +1538,11 @@ func build_ui() -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	var minus := mk_menu_button("-", _sens_down)
-	minus.custom_minimum_size = Vector2(70, 52)
+	minus.custom_minimum_size = Vector2(70, 46)
 	var plus := mk_menu_button("+", _sens_up)
-	plus.custom_minimum_size = Vector2(70, 52)
+	plus.custom_minimum_size = Vector2(70, 46)
 	lbl_sens = mk_label("", 21)
-	lbl_sens.custom_minimum_size = Vector2(200, 52)
+	lbl_sens.custom_minimum_size = Vector2(200, 46)
 	lbl_sens.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl_sens.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	row.add_child(minus)
@@ -1517,6 +1551,8 @@ func build_ui() -> void:
 	right.add_child(row)
 	menu_btns["quality"] = mk_menu_button("", _cycle_quality)
 	right.add_child(menu_btns["quality"])
+	menu_btns["models"] = mk_menu_button("", _toggle_models)
+	right.add_child(menu_btns["models"])
 	lbl_gyro = mk_label("", 16)
 	lbl_gyro.custom_minimum_size = Vector2(360, 70)
 	lbl_gyro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1564,6 +1600,14 @@ func _sens_up() -> void:
 	refresh_menu()
 
 
+func _toggle_models() -> void:
+	show_models = not show_models
+	for n in model_nodes:
+		var mi: MeshInstance3D = n
+		mi.visible = show_models
+	refresh_menu()
+
+
 func _cycle_quality() -> void:
 	quality = (quality + 2) % 3
 	apply_quality()
@@ -1578,6 +1622,7 @@ func refresh_menu() -> void:
 	set_btn_text("swap", "Swap gyro axes: " + ("On" if swap_axes else "Off"))
 	var qn: Array = ["Low (fastest)", "Medium (recommended)", "High"]
 	set_btn_text("quality", "Graphics: " + str(qn[quality]))
+	set_btn_text("models", "Scanned rocks/plants: " + ("On" if show_models else "Off"))
 	lbl_sens.text = "Sensitivity %.1f" % sens
 	save_settings()
 
@@ -1684,8 +1729,8 @@ func adapt_resolution(delta: float) -> void:
 	fps_frames = 0
 	var tops: Array = [0.7, 0.85, 1.0]
 	var top: float = tops[quality]
-	if fps < 28.0 and res_scale > 0.5:
-		res_scale = maxf(0.5, res_scale - 0.1)
+	if fps < 28.0 and res_scale > 0.7:
+		res_scale = maxf(0.7, res_scale - 0.05)
 	elif fps > 50.0 and res_scale < top:
 		res_scale = minf(top, res_scale + 0.05)
 	get_viewport().scaling_3d_scale = res_scale
@@ -1955,6 +2000,7 @@ func _process(delta: float) -> void:
 			g += "\nTurn left and right: one number should jump. If the view turns the wrong way in game, switch Invert or Swap."
 		else:
 			g += "\nNo data yet. Move the phone. If it stays at 0.00 your phone has no gyroscope; use touch drag."
+		g += "\nScanned models: %d loaded, %d skipped (too heavy for a phone)" % [models_ok, models_skipped]
 		lbl_gyro.text = g
 		if not started:
 			player.rotation.y = sin(Time.get_ticks_msec() * 0.0001) * 0.45
@@ -2081,7 +2127,10 @@ func update_laser() -> void:
 
 
 func update_hud() -> void:
-	lbl_fps.text = "%d fps  (res %d%%)" % [Engine.get_frames_per_second(), int(res_scale * 100.0)]
+	var tris := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000000.0
+	var draws := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	var cpu_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	lbl_fps.text = "%d fps   %.1fM tris   %d draws   cpu %.0f ms   res %d%%" % [Engine.get_frames_per_second(), tris, draws, cpu_ms, int(res_scale * 100.0)]
 	var ammo := "%d / %d" % [clip, reserve]
 	if reloading > 0.0:
 		ammo = "Reloading"
@@ -2100,4 +2149,5 @@ func update_hud() -> void:
 	if crouching:
 		st += "   Crouched"
 	lbl_status.text = st
+
 
