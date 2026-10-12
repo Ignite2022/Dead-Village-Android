@@ -74,7 +74,13 @@ var inv_x := false
 var inv_y := false
 var swap_axes := false
 var use_gyro := true
-var quality := 2
+var quality := 1
+var auto_res := true
+var res_scale := 0.8
+var fps_acc := 0.0
+var fps_frames := 0
+var tag_heavy := false
+var heavy: Array = []
 
 # ---------------- world ----------------
 var noise := FastNoiseLite.new()
@@ -358,7 +364,7 @@ func build_environment() -> void:
 	world_env.fog_enabled = true
 	world_env.fog_light_color = Color(0.1, 0.11, 0.14)
 	world_env.fog_light_energy = 1.0
-	world_env.fog_density = 0.026
+	world_env.fog_density = 0.032
 	world_env.fog_sky_affect = 0.55
 	world_env.fog_height = 1.2
 	world_env.fog_height_density = 0.1
@@ -373,7 +379,7 @@ func build_environment() -> void:
 	moon.light_energy = 0.6
 	moon.shadow_enabled = true
 	moon.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-	moon.directional_shadow_max_distance = 45.0
+	moon.directional_shadow_max_distance = 28.0
 	moon.rotation_degrees = Vector3(-38.0, 150.0, 0.0)
 	add_child(moon)
 
@@ -486,6 +492,8 @@ func add_multimesh(mesh: Mesh, xforms: Array, cols: Array, range_end: float, sha
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mmi)
 	ranged.append([mmi, range_end])
+	if tag_heavy:
+		heavy.append(mmi)
 
 
 func add_chunked(mesh: Mesh, xforms: Array, cols: Array, range_end: float, shadows: bool, bucket: float) -> void:
@@ -530,14 +538,21 @@ func _collect(n: Node, xf: Transform3D, out: Array) -> void:
 func scatter_models(parts_list: Array, xforms_per_model: Dictionary, range_end: float, shadows: bool) -> void:
 	for k in xforms_per_model:
 		var parts: Array = parts_list[k]
-		for part in parts:
-			var pm: Mesh = part[0]
-			var pt: Transform3D = part[1]
-			var xs: Array = []
-			for t in xforms_per_model[k]:
-				var tt: Transform3D = t
-				xs.append(tt * pt)
-			add_chunked(pm, xs, [], range_end, shadows, 40.0)
+		for t in xforms_per_model[k]:
+			var tt: Transform3D = t
+			for part in parts:
+				var mi := MeshInstance3D.new()
+				mi.mesh = part[0]
+				var pt: Transform3D = part[1]
+				mi.transform = tt * pt
+				mi.visibility_range_end = range_end
+				mi.lod_bias = 0.5
+				if shadows:
+					mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+				else:
+					mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				add_child(mi)
+				ranged.append([mi, range_end])
 
 
 # =====================================================================
@@ -632,12 +647,12 @@ func make_pine() -> Array:
 	st2.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var rr := RandomNumberGenerator.new()
 	rr.seed = 11
-	var levels := 14
+	var levels := 11
 	for k in levels:
 		var f := float(k) / float(levels - 1)
 		var y := 2.0 + f * (H - 2.4)
 		var blen := lerpf(3.6, 0.6, pow(f, 0.85))
-		var count := 7 if k < levels - 3 else 5
+		var count := 6 if k < levels - 3 else 4
 		for j in count:
 			var a := TAU * float(j) / float(count) + k * 0.7 + rr.randf_range(-0.2, 0.2)
 			var dir := Vector3(cos(a), 0.0, sin(a))
@@ -690,9 +705,11 @@ func build_trees() -> void:
 	var pine_x: Array = []
 	var pine_c: Array = []
 	var model_x := {}
+	var model_n := 0
 	for p in pts:
 		var v4: Vector4 = p
-		if not parts_list.is_empty() and r.randf() < 0.12:
+		if not parts_list.is_empty() and model_n < 12 and r.randf() < 0.12:
+			model_n += 1
 			var k := r.randi() % parts_list.size()
 			if not model_x.has(k):
 				model_x[k] = []
@@ -703,9 +720,11 @@ func build_trees() -> void:
 			pine_x.append(Transform3D(bs, Vector3(v4.x, v4.y - 0.1, v4.z)))
 			var v := r.randf()
 			pine_c.append(Color(0.75 + v * 0.35, 0.8 + v * 0.3, 0.75 + v * 0.25))
-	add_chunked(pine[0], pine_x, [], 120.0, true, 40.0)
-	add_chunked(pine[1], pine_x, pine_c, 120.0, true, 40.0)
-	scatter_models(parts_list, model_x, 90.0, true)
+	add_chunked(pine[0], pine_x, [], 95.0, true, 40.0)
+	tag_heavy = true
+	add_chunked(pine[1], pine_x, pine_c, 95.0, true, 40.0)
+	tag_heavy = false
+	scatter_models(parts_list, model_x, 70.0, false)
 
 
 func make_rock() -> ArrayMesh:
@@ -740,6 +759,7 @@ func build_rocks() -> void:
 	rock.surface_set_material(0, pbr_mat("rock", Color(0.34, 0.33, 0.31), 0.6))
 	var xs: Array = []
 	var model_x := {}
+	var model_n := 0
 	for i in 190:
 		var z := r.randf_range(-330.0, 30.0)
 		var x := path_x(z) + r.randf_range(-45.0, 45.0)
@@ -747,7 +767,8 @@ func build_rocks() -> void:
 			continue
 		var s := 0.25 + r.randf() * r.randf() * 1.6
 		var y := height_at(x, z)
-		if not parts_list.is_empty() and r.randf() < 0.4:
+		if not parts_list.is_empty() and model_n < 28 and r.randf() < 0.4:
+			model_n += 1
 			var k := r.randi() % parts_list.size()
 			if not model_x.has(k):
 				model_x[k] = []
@@ -759,8 +780,8 @@ func build_rocks() -> void:
 			xs.append(Transform3D(bs, Vector3(x, y - s * 0.25, z)))
 		if s > 0.7:
 			tree_col.append(Vector3(x, z, s * 0.8))
-	add_chunked(rock, xs, [], 90.0, true, 40.0)
-	scatter_models(parts_list, model_x, 70.0, true)
+	add_chunked(rock, xs, [], 70.0, true, 40.0)
+	scatter_models(parts_list, model_x, 45.0, false)
 
 
 func build_plants() -> void:
@@ -774,7 +795,7 @@ func build_plants() -> void:
 	var r := RandomNumberGenerator.new()
 	r.seed = 31
 	var model_x := {}
-	for i in 160:
+	for i in 50:
 		var z := r.randf_range(-175.0, -20.0)
 		var x := path_x(z) + r.randf_range(-30.0, 30.0)
 		if absf(x - path_x(z)) < 3.0 or in_house(x, z, 1.0):
@@ -784,7 +805,7 @@ func build_plants() -> void:
 			model_x[k] = []
 		var ms := r.randf_range(0.7, 1.3)
 		model_x[k].append(Transform3D(Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(ms, ms, ms)), Vector3(x, height_at(x, z), z)))
-	scatter_models(parts_list, model_x, 40.0, false)
+	scatter_models(parts_list, model_x, 28.0, false)
 
 
 func make_tuft() -> ArrayMesh:
@@ -830,7 +851,7 @@ func build_grass() -> void:
 	var xs: Array = []
 	var cs: Array = []
 	var n := 0
-	while n < 15000:
+	while n < 11000:
 		var z := r.randf_range(-330.0, 32.0)
 		var x := path_x(z) + r.randf_range(-32.0, 32.0)
 		var dx := absf(x - path_x(z))
@@ -856,7 +877,7 @@ func build_grass() -> void:
 			xs.append(Transform3D(bs, Vector3(x, height_at(x, z), z)))
 			var v := r.randf()
 			cs.append(Color(1.3 + v * 0.3, 1.15 + v * 0.2, 0.9 + v * 0.2))
-	add_chunked(tuft, xs, cs, 55.0, false, 24.0)
+	add_chunked(tuft, xs, cs, 42.0, false, 24.0)
 
 
 # =====================================================================
@@ -1189,8 +1210,8 @@ func build_gun() -> void:
 	gun.position = gun_base
 	var metal := StandardMaterial3D.new()
 	metal.albedo_color = Color(0.06, 0.06, 0.07)
-	metal.metallic = 0.9
-	metal.roughness = 0.38
+	metal.metallic = 0.55
+	metal.roughness = 0.6
 	var poly := StandardMaterial3D.new()
 	poly.albedo_color = Color(0.05, 0.05, 0.05)
 	poly.roughness = 0.75
@@ -1555,7 +1576,7 @@ func refresh_menu() -> void:
 	set_btn_text("invx", "Invert turn: " + ("On" if inv_x else "Off"))
 	set_btn_text("invy", "Invert tilt: " + ("On" if inv_y else "Off"))
 	set_btn_text("swap", "Swap gyro axes: " + ("On" if swap_axes else "Off"))
-	var qn: Array = ["Low (fastest)", "Medium", "High"]
+	var qn: Array = ["Low (fastest)", "Medium (recommended)", "High"]
 	set_btn_text("quality", "Graphics: " + str(qn[quality]))
 	lbl_sens.text = "Sensitivity %.1f" % sens
 	save_settings()
@@ -1620,37 +1641,64 @@ func show_msg(t: String, dur: float) -> void:
 func apply_quality() -> void:
 	var vp := get_viewport()
 	var f := 1.0
+	vp.msaa_3d = Viewport.MSAA_DISABLED
 	if quality == 0:
-		vp.scaling_3d_scale = 0.7
-		vp.msaa_3d = Viewport.MSAA_DISABLED
+		res_scale = 0.6
 		moon.shadow_enabled = false
 		torch.shadow_enabled = false
+		world_env.glow_enabled = false
 		f = 0.6
 	elif quality == 1:
-		vp.scaling_3d_scale = 0.85
-		vp.msaa_3d = Viewport.MSAA_DISABLED
+		res_scale = 0.75
 		moon.shadow_enabled = true
 		torch.shadow_enabled = false
+		world_env.glow_enabled = true
 		f = 0.8
 	else:
-		vp.scaling_3d_scale = 1.0
-		vp.msaa_3d = Viewport.MSAA_2X
+		res_scale = 0.9
 		moon.shadow_enabled = true
 		torch.shadow_enabled = true
+		world_env.glow_enabled = true
 		f = 1.0
+	vp.scaling_3d_scale = res_scale
 	for rg in ranged:
 		var gi: GeometryInstance3D = rg[0]
 		gi.visibility_range_end = float(rg[1]) * f
+	for h in heavy:
+		var g2: GeometryInstance3D = h
+		if quality == 2:
+			g2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		else:
+			g2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+func adapt_resolution(delta: float) -> void:
+	if not auto_res:
+		return
+	fps_acc += delta
+	fps_frames += 1
+	if fps_acc < 1.5:
+		return
+	var fps := fps_frames / fps_acc
+	fps_acc = 0.0
+	fps_frames = 0
+	var tops: Array = [0.7, 0.85, 1.0]
+	var top: float = tops[quality]
+	if fps < 28.0 and res_scale > 0.5:
+		res_scale = maxf(0.5, res_scale - 0.1)
+	elif fps > 50.0 and res_scale < top:
+		res_scale = minf(top, res_scale + 0.05)
+	get_viewport().scaling_3d_scale = res_scale
 
 
 func load_settings() -> void:
-	if cfg.load("user://settings.cfg") == OK:
+	if cfg.load("user://settings.cfg") == OK and int(cfg.get_value("s", "v", 0)) >= 2:
 		sens = cfg.get_value("s", "sens", 1.0)
 		inv_x = cfg.get_value("s", "inv_x", false)
 		inv_y = cfg.get_value("s", "inv_y", false)
 		swap_axes = cfg.get_value("s", "swap", false)
 		use_gyro = cfg.get_value("s", "gyro", true)
-		quality = cfg.get_value("s", "quality", 2)
+		quality = cfg.get_value("s", "quality", 1)
 
 
 func save_settings() -> void:
@@ -1660,6 +1708,7 @@ func save_settings() -> void:
 	cfg.set_value("s", "swap", swap_axes)
 	cfg.set_value("s", "gyro", use_gyro)
 	cfg.set_value("s", "quality", quality)
+	cfg.set_value("s", "v", 2)
 	cfg.save("user://settings.cfg")
 
 
@@ -1915,6 +1964,7 @@ func _process(delta: float) -> void:
 	if playing:
 		update_laser()
 		update_hud()
+		adapt_resolution(delta)
 	laser.visible = playing
 	dot.visible = dot.visible and playing
 	gun.visible = started
@@ -2031,7 +2081,7 @@ func update_laser() -> void:
 
 
 func update_hud() -> void:
-	lbl_fps.text = "%d fps" % Engine.get_frames_per_second()
+	lbl_fps.text = "%d fps  (res %d%%)" % [Engine.get_frames_per_second(), int(res_scale * 100.0)]
 	var ammo := "%d / %d" % [clip, reserve]
 	if reloading > 0.0:
 		ammo = "Reloading"
@@ -2050,3 +2100,4 @@ func update_hud() -> void:
 	if crouching:
 		st += "   Crouched"
 	lbl_status.text = st
+
