@@ -330,26 +330,63 @@ func glow_mat(c: Color, billboard: bool) -> StandardMaterial3D:
 
 
 # =====================================================================
+var world_sky: Sky
+var sky_photo := true
+var sky_photo_mat: Material = null
+var sky_simple_mat: Material = null
+var slow_time := 0.0
+
+
+func build_sky_materials() -> void:
+	var ps := ProceduralSkyMaterial.new()
+	ps.sky_top_color = Color(0.015, 0.02, 0.05)
+	ps.sky_horizon_color = Color(0.13, 0.14, 0.19)
+	ps.ground_bottom_color = Color(0.02, 0.02, 0.02)
+	ps.ground_horizon_color = Color(0.13, 0.14, 0.19)
+	ps.sun_angle_max = 3.0
+	sky_simple_mat = ps
+	# The night photo is converted to a half-float texture with mipmaps.
+	# A raw 32-bit float panorama is extremely slow on some phone GPUs.
+	var hp: String = A.get("hdri", "")
+	if hp == "" or not ResourceLoader.exists(hp):
+		return
+	var src: Texture2D = load(hp)
+	if src == null:
+		return
+	var img: Image = src.get_image()
+	if img == null or img.is_empty():
+		return
+	if img.is_compressed():
+		img.decompress()
+	if img.is_compressed():
+		return
+	img.convert(Image.FORMAT_RGBAH)
+	if img.get_width() > 2048:
+		img.resize(2048, 1024, Image.INTERPOLATE_BILINEAR)
+	img.generate_mipmaps()
+	var psm := PanoramaSkyMaterial.new()
+	psm.panorama = ImageTexture.create_from_image(img)
+	psm.energy_multiplier = 0.5
+	sky_photo_mat = psm
+
+
+func apply_sky() -> void:
+	if sky_photo and sky_photo_mat != null:
+		world_sky.sky_material = sky_photo_mat
+	else:
+		world_sky.sky_material = sky_simple_mat
+
+
 func build_environment() -> void:
 	var we := WorldEnvironment.new()
 	world_env = Environment.new()
 	world_env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
-	var hp: String = A.get("hdri", "")
-	if hp != "" and ResourceLoader.exists(hp):
-		var psm := PanoramaSkyMaterial.new()
-		psm.panorama = load(hp)
-		psm.energy_multiplier = 0.5
-		sky.sky_material = psm
-	else:
-		var ps := ProceduralSkyMaterial.new()
-		ps.sky_top_color = Color(0.015, 0.02, 0.05)
-		ps.sky_horizon_color = Color(0.13, 0.14, 0.19)
-		ps.ground_bottom_color = Color(0.02, 0.02, 0.02)
-		ps.ground_horizon_color = Color(0.13, 0.14, 0.19)
-		ps.sun_angle_max = 3.0
-		sky.sky_material = ps
-	sky.radiance_size = Sky.RADIANCE_SIZE_128
+	world_sky = sky
+	build_sky_materials()
+	apply_sky()
+	sky.radiance_size = Sky.RADIANCE_SIZE_64
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
 	world_env.sky = sky
 	world_env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	world_env.ambient_light_energy = 0.7
@@ -1429,7 +1466,7 @@ func set_btn_on(id: String, on: bool) -> void:
 func mk_menu_button(txt: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.text = txt
-	b.custom_minimum_size = Vector2(360, 46)
+	b.custom_minimum_size = Vector2(360, 42)
 	b.add_theme_font_size_override("font_size", 22)
 	if font != null:
 		b.add_theme_font_override("font", font)
@@ -1553,6 +1590,8 @@ func build_ui() -> void:
 	right.add_child(menu_btns["quality"])
 	menu_btns["models"] = mk_menu_button("", _toggle_models)
 	right.add_child(menu_btns["models"])
+	menu_btns["sky"] = mk_menu_button("", _toggle_sky)
+	right.add_child(menu_btns["sky"])
 	lbl_gyro = mk_label("", 16)
 	lbl_gyro.custom_minimum_size = Vector2(360, 70)
 	lbl_gyro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1600,6 +1639,12 @@ func _sens_up() -> void:
 	refresh_menu()
 
 
+func _toggle_sky() -> void:
+	sky_photo = not sky_photo
+	apply_sky()
+	refresh_menu()
+
+
 func _toggle_models() -> void:
 	show_models = not show_models
 	for n in model_nodes:
@@ -1623,6 +1668,10 @@ func refresh_menu() -> void:
 	var qn: Array = ["Low (fastest)", "Medium (recommended)", "High"]
 	set_btn_text("quality", "Graphics: " + str(qn[quality]))
 	set_btn_text("models", "Scanned rocks/plants: " + ("On" if show_models else "Off"))
+	var sky_txt := "Simple (fast)"
+	if sky_photo:
+		sky_txt = "Night photo" if sky_photo_mat != null else "Night photo (not available)"
+	set_btn_text("sky", "Sky: " + sky_txt)
 	lbl_sens.text = "Sensitivity %.1f" % sens
 	save_settings()
 
@@ -1725,6 +1774,15 @@ func adapt_resolution(delta: float) -> void:
 	if fps_acc < 1.5:
 		return
 	var fps := fps_frames / fps_acc
+	if sky_photo and fps < 20.0:
+		slow_time += fps_acc
+		if slow_time > 3.0:
+			sky_photo = false
+			apply_sky()
+			save_settings()
+			show_msg("Switched to the simple sky for speed", 3.0)
+	else:
+		slow_time = 0.0
 	fps_acc = 0.0
 	fps_frames = 0
 	var tops: Array = [0.7, 0.85, 1.0]
@@ -1744,6 +1802,7 @@ func load_settings() -> void:
 		swap_axes = cfg.get_value("s", "swap", false)
 		use_gyro = cfg.get_value("s", "gyro", true)
 		quality = cfg.get_value("s", "quality", 1)
+		sky_photo = cfg.get_value("s", "sky", true)
 
 
 func save_settings() -> void:
@@ -1754,6 +1813,7 @@ func save_settings() -> void:
 	cfg.set_value("s", "gyro", use_gyro)
 	cfg.set_value("s", "quality", quality)
 	cfg.set_value("s", "v", 2)
+	cfg.set_value("s", "sky", sky_photo)
 	cfg.save("user://settings.cfg")
 
 
@@ -2149,5 +2209,3 @@ func update_hud() -> void:
 	if crouching:
 		st += "   Crouched"
 	lbl_status.text = st
-
-
