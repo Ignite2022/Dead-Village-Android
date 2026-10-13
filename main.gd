@@ -476,6 +476,7 @@ func build_terrain() -> void:
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	mi.material_override = sm
+	groups["terrain"].append(mi)
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
 
@@ -529,6 +530,8 @@ func add_multimesh(mesh: Mesh, xforms: Array, cols: Array, range_end: float, sha
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mmi)
 	ranged.append([mmi, range_end])
+	if cur_tag != "":
+		groups[cur_tag].append(mmi)
 	if tag_heavy:
 		heavy.append(mmi)
 
@@ -624,6 +627,8 @@ func scatter_models(parts_list: Array, xforms_per_model: Dictionary, range_end: 
 				add_child(mi)
 				ranged.append([mi, range_end])
 				model_nodes.append(mi)
+				if cur_tag != "":
+					groups[cur_tag].append(mi)
 
 
 # =====================================================================
@@ -791,11 +796,13 @@ func build_trees() -> void:
 			pine_x.append(Transform3D(bs, Vector3(v4.x, v4.y - 0.1, v4.z)))
 			var v := r.randf()
 			pine_c.append(Color(0.75 + v * 0.35, 0.8 + v * 0.3, 0.75 + v * 0.25))
+	cur_tag = "trees"
 	add_chunked(pine[0], pine_x, [], 95.0, true, 40.0)
 	tag_heavy = true
 	add_chunked(pine[1], pine_x, pine_c, 95.0, true, 40.0)
 	tag_heavy = false
 	scatter_models(parts_list, model_x, 70.0, false)
+	cur_tag = ""
 
 
 func make_rock() -> ArrayMesh:
@@ -851,8 +858,10 @@ func build_rocks() -> void:
 			xs.append(Transform3D(bs, Vector3(x, y - s * 0.25, z)))
 		if s > 0.7:
 			tree_col.append(Vector3(x, z, s * 0.8))
+	cur_tag = "rocks"
 	add_chunked(rock, xs, [], 70.0, true, 40.0)
 	scatter_models(parts_list, model_x, 45.0, false)
+	cur_tag = ""
 
 
 func build_plants() -> void:
@@ -876,7 +885,9 @@ func build_plants() -> void:
 			model_x[k] = []
 		var ms := r.randf_range(0.7, 1.3)
 		model_x[k].append(Transform3D(Basis(Vector3.UP, r.randf() * TAU).scaled(Vector3(ms, ms, ms)), Vector3(x, height_at(x, z), z)))
+	cur_tag = "rocks"
 	scatter_models(parts_list, model_x, 28.0, false)
+	cur_tag = ""
 
 
 func make_tuft() -> ArrayMesh:
@@ -948,7 +959,9 @@ func build_grass() -> void:
 			xs.append(Transform3D(bs, Vector3(x, height_at(x, z), z)))
 			var v := r.randf()
 			cs.append(Color(1.3 + v * 0.3, 1.15 + v * 0.2, 0.9 + v * 0.2))
+	cur_tag = "grass"
 	add_chunked(tuft, xs, cs, 42.0, false, 24.0)
+	cur_tag = ""
 
 
 # =====================================================================
@@ -1145,6 +1158,7 @@ func build_fire() -> void:
 	flame.mesh = q
 	flame.position = Vector3(0.0, 0.5, 0.0)
 	f.add_child(flame)
+	groups["particles"].append(flame)
 	var smoke := CPUParticles3D.new()
 	smoke.amount = 24
 	smoke.lifetime = 4.0
@@ -1169,6 +1183,7 @@ func build_fire() -> void:
 	smoke.mesh = q2
 	smoke.position = Vector3(0.0, 1.5, 0.0)
 	f.add_child(smoke)
+	groups["particles"].append(smoke)
 	var ol := OmniLight3D.new()
 	ol.light_color = Color(1.0, 0.5, 0.2)
 	ol.light_energy = 2.4
@@ -1262,6 +1277,7 @@ func build_player() -> void:
 	ff.mesh = fq
 	ff.position = Vector3(0.0, 1.2, 0.0)
 	player.add_child(ff)
+	groups["particles"].append(ff)
 
 
 func gun_box(mat: Material, sz: Vector3, pos: Vector3, rx: float) -> void:
@@ -1590,6 +1606,10 @@ func build_ui() -> void:
 	right.add_child(menu_btns["quality"])
 	menu_btns["models"] = mk_menu_button("", _toggle_models)
 	right.add_child(menu_btns["models"])
+	menu_btns["test"] = mk_menu_button("Run speed test (25 s)", start_test)
+	left.add_child(menu_btns["test"])
+	lbl_results = mk_label("", 15)
+	left.add_child(lbl_results)
 	menu_btns["sky"] = mk_menu_button("", _toggle_sky)
 	right.add_child(menu_btns["sky"])
 	lbl_gyro = mk_label("", 16)
@@ -1706,6 +1726,124 @@ func layout() -> void:
 	menu_box.reset_size()
 	var ms := menu_box.get_combined_minimum_size()
 	menu_box.position = (vs - ms) * 0.5
+
+
+var groups: Dictionary = {"trees": [], "grass": [], "rocks": [], "terrain": [], "particles": []}
+var cur_tag := ""
+var testing := false
+var skip_laser := false
+var script_us := 0
+var test_i := 0
+var test_t := 0.0
+var test_frames := 0
+var test_time := 0.0
+var test_script := 0.0
+var test_lines: Array = []
+var lbl_results: Label
+const TESTS := ["All on", "No laser aim", "No trees", "No grass", "No rocks", "No terrain", "No shadows", "No fog", "No glow", "No lamps", "No particles", "Simple sky", "No sky", "Half resolution"]
+
+
+func set_group(id: String, on: bool) -> void:
+	for n in groups[id]:
+		var nd: Node3D = n
+		nd.visible = on
+
+
+func test_apply(i: int, on: bool) -> void:
+	match i:
+		1:
+			skip_laser = not on
+			laser.visible = on
+			dot.visible = on
+		2:
+			set_group("trees", on)
+		3:
+			set_group("grass", on)
+		4:
+			set_group("rocks", on)
+		5:
+			set_group("terrain", on)
+		6:
+			moon.shadow_enabled = on and quality > 0
+		7:
+			world_env.fog_enabled = on
+		8:
+			world_env.glow_enabled = on and quality > 0
+		9:
+			for fl in flicker:
+				var l: OmniLight3D = fl[0]
+				l.visible = on
+		10:
+			set_group("particles", on)
+		11:
+			if on:
+				apply_sky()
+			else:
+				world_sky.sky_material = sky_simple_mat
+		12:
+			world_env.background_mode = Environment.BG_SKY if on else Environment.BG_COLOR
+			world_env.background_color = Color(0.08, 0.09, 0.12)
+		13:
+			get_viewport().scaling_3d_scale = res_scale if on else 0.5
+
+
+func start_test() -> void:
+	started = true
+	show_menu(false)
+	playing = false
+	testing = true
+	reset_player()
+	pitch = 0.06
+	test_i = 0
+	test_t = 0.0
+	test_frames = 0
+	test_time = 0.0
+	test_script = 0.0
+	test_lines = []
+	lbl_msg.modulate.a = 1.0
+
+
+func run_test(delta: float) -> void:
+	player.rotation = Vector3.ZERO
+	cam.position = Vector3(0.0, 1.65, 0.0)
+	cam.rotation = Vector3(pitch, 0.0, 0.0)
+	update_effects(delta)
+	if not skip_laser:
+		update_laser()
+	update_hud()
+	test_t += delta
+	if test_t > 0.7:
+		test_frames += 1
+		test_time += delta
+		test_script += script_us
+	lbl_msg.text = "Speed test %d / %d\n%s" % [test_i + 1, TESTS.size(), TESTS[test_i]]
+	msg_t = 2.0
+	if test_t > 2.3:
+		var fps := test_frames / maxf(0.001, test_time)
+		var sms := test_script / maxf(1.0, float(test_frames)) / 1000.0
+		test_lines.append("%s: %.0f fps (script %.1f ms)" % [TESTS[test_i], fps, sms])
+		test_apply(test_i, true)
+		test_i += 1
+		test_t = 0.0
+		test_frames = 0
+		test_time = 0.0
+		test_script = 0.0
+		if test_i >= TESTS.size():
+			testing = false
+			lbl_msg.text = ""
+			var half := int(ceil(test_lines.size() / 2.0))
+			var txt := "Speed test (screenshot this):"
+			for r in half:
+				var row: String = test_lines[r]
+				if r + half < test_lines.size():
+					row += "      " + str(test_lines[r + half])
+				txt += "\n" + row
+			lbl_results.text = txt
+			print(txt)
+			show_menu(true)
+			layout()
+			return
+		test_apply(test_i, false)
 
 
 func show_menu(v: bool) -> void:
@@ -2051,6 +2189,15 @@ func collide(x: float, z: float, r: float) -> Vector2:
 
 
 func _process(delta: float) -> void:
+	var t0 := Time.get_ticks_usec()
+	if testing:
+		run_test(delta)
+	else:
+		_frame(delta)
+	script_us = Time.get_ticks_usec() - t0
+
+
+func _frame(delta: float) -> void:
 	gyro_now = Input.get_gyroscope()
 	if gyro_now.length_squared() > 1e-7:
 		gyro_seen = true
@@ -2068,7 +2215,8 @@ func _process(delta: float) -> void:
 		update_player(delta)
 	update_effects(delta)
 	if playing:
-		update_laser()
+		if not skip_laser:
+			update_laser()
 		update_hud()
 		adapt_resolution(delta)
 	laser.visible = playing
@@ -2190,7 +2338,7 @@ func update_hud() -> void:
 	var tris := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000000.0
 	var draws := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 	var cpu_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
-	lbl_fps.text = "%d fps   %.1fM tris   %d draws   cpu %.0f ms   res %d%%" % [Engine.get_frames_per_second(), tris, draws, cpu_ms, int(res_scale * 100.0)]
+	lbl_fps.text = "%d fps   %.1fM tris   %d draws   engine %.0f ms   script %.1f ms   res %d%%" % [Engine.get_frames_per_second(), tris, draws, cpu_ms, script_us / 1000.0, int(res_scale * 100.0)]
 	var ammo := "%d / %d" % [clip, reserve]
 	if reloading > 0.0:
 		ammo = "Reloading"
