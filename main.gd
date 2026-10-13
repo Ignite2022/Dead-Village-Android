@@ -9,7 +9,6 @@ const INK := Color(0.91, 0.86, 0.75)
 
 const TERRAIN_SHADER := """
 shader_type spatial;
-render_mode cull_disabled;
 uniform sampler2D g_alb : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D g_nor : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D g_rgh : hint_default_white, filter_linear_mipmap_anisotropic, repeat_enable;
@@ -43,6 +42,23 @@ void fragment() {
 	float ro = mix(mix(texture(g_rgh, uv).g, texture(p_rgh, uv).g, pm), texture(r_rgh, uv * 0.7).g, rm);
 	ROUGHNESS = clamp(ro, 0.35, 1.0);
 	SPECULAR = 0.35;
+}
+"""
+
+const TERRAIN_SIMPLE := """
+shader_type spatial;
+uniform sampler2D g_alb : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D p_alb : source_color, filter_linear_mipmap, repeat_enable;
+uniform vec3 g_tint = vec3(1.0);
+uniform vec3 p_tint = vec3(1.0);
+varying vec3 w_pos;
+void vertex() {
+	w_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+void fragment() {
+	vec2 uv = w_pos.xz * 0.3;
+	ALBEDO = mix(texture(g_alb, uv).rgb * g_tint, texture(p_alb, uv).rgb * p_tint, clamp(COLOR.r, 0.0, 1.0)) * COLOR.g;
+	ROUGHNESS = 0.95;
 }
 """
 
@@ -476,6 +492,13 @@ func build_terrain() -> void:
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	mi.material_override = sm
+	terrain_mi = mi
+	terrain_simple = ShaderMaterial.new()
+	var sh2 := Shader.new()
+	sh2.code = TERRAIN_SIMPLE
+	terrain_simple.shader = sh2
+	for pname in ["g_alb", "p_alb", "g_tint", "p_tint"]:
+		terrain_simple.set_shader_parameter(pname, sm.get_shader_parameter(pname))
 	groups["terrain"].append(mi)
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
@@ -1675,6 +1698,8 @@ func _toggle_models() -> void:
 
 func _cycle_quality() -> void:
 	quality = (quality + 2) % 3
+	fix_level = 0
+	fixes_done = []
 	apply_quality()
 	refresh_menu()
 
@@ -1904,6 +1929,42 @@ func apply_quality() -> void:
 			g2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
+var terrain_mi: MeshInstance3D
+var terrain_simple: ShaderMaterial
+var aim_cache: Dictionary = {}
+var aim_frame := 0
+var fix_level := 0
+var fixes_done: Array = []
+var last_fps := 60.0
+const FIX_NAMES := ["Shadows off", "Glow off", "Far trees hidden", "Grass reduced", "Simpler ground", "Height fog off", "Fireflies and fire off", "Sky off"]
+
+
+func apply_fix(i: int) -> void:
+	match i:
+		0:
+			moon.shadow_enabled = false
+			torch.shadow_enabled = false
+		1:
+			world_env.glow_enabled = false
+		2:
+			for n in groups["trees"]:
+				var g: GeometryInstance3D = n
+				g.visibility_range_end = 35.0
+		3:
+			for n in groups["grass"]:
+				var g: GeometryInstance3D = n
+				g.visibility_range_end = 16.0
+		4:
+			terrain_mi.material_override = terrain_simple
+		5:
+			world_env.fog_height_density = 0.0
+		6:
+			set_group("particles", false)
+		7:
+			world_env.background_mode = Environment.BG_COLOR
+			world_env.background_color = Color(0.08, 0.09, 0.12)
+
+
 func adapt_resolution(delta: float) -> void:
 	if not auto_res:
 		return
@@ -1912,13 +1973,15 @@ func adapt_resolution(delta: float) -> void:
 	if fps_acc < 1.5:
 		return
 	var fps := fps_frames / fps_acc
-	if sky_photo and fps < 20.0:
+	last_fps = fps
+	if fps < 25.0 and fix_level < FIX_NAMES.size():
 		slow_time += fps_acc
-		if slow_time > 3.0:
-			sky_photo = false
-			apply_sky()
-			save_settings()
-			show_msg("Switched to the simple sky for speed", 3.0)
+		if slow_time > 2.5:
+			apply_fix(fix_level)
+			fixes_done.append("%s (was %d fps)" % [FIX_NAMES[fix_level], int(fps)])
+			show_msg("Speed fix: " + str(FIX_NAMES[fix_level]), 2.0)
+			fix_level += 1
+			slow_time = 0.0
 	else:
 		slow_time = 0.0
 	fps_acc = 0.0
@@ -2081,14 +2144,14 @@ func ray_box(o: Vector3, d: Vector3, ob: Dictionary) -> float:
 func aim() -> Dictionary:
 	var o := cam.global_position
 	var d := -cam.global_transform.basis.z
-	var best := 120.0
+	var best := 90.0
 	var t := 0.5
 	while t < best:
 		var p := o + d * t
 		if p.y < height_at(p.x, p.z):
 			best = maxf(0.3, t - 0.2)
 			break
-		t += 0.4 if t < 30.0 else 0.8
+		t += 0.5 if t < 15.0 else 1.2
 	for ob in obstacles:
 		var bt := ray_box(o, d, ob)
 		if bt < best:
@@ -2106,7 +2169,7 @@ func aim() -> Dictionary:
 				var py := o.y + d.y * proj
 				if py < height_at(tv.x, tv.y) + 4.0:
 					best = proj
-	return {"point": o + d * best, "dist": best, "sky": best >= 119.0}
+	return {"point": o + d * best, "dist": best, "sky": best >= 89.0}
 
 
 func fire() -> void:
@@ -2320,7 +2383,10 @@ func update_effects(delta: float) -> void:
 
 
 func update_laser() -> void:
-	var h := aim()
+	aim_frame += 1
+	if aim_cache.is_empty() or aim_frame % 2 == 0:
+		aim_cache = aim()
+	var h: Dictionary = aim_cache
 	var a := laser_origin.global_position
 	var b: Vector3 = h["point"]
 	laser_mesh.clear_surfaces()
@@ -2338,7 +2404,10 @@ func update_hud() -> void:
 	var tris := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000000.0
 	var draws := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 	var cpu_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
-	lbl_fps.text = "%d fps   %.1fM tris   %d draws   engine %.0f ms   script %.1f ms   res %d%%" % [Engine.get_frames_per_second(), tris, draws, cpu_ms, script_us / 1000.0, int(res_scale * 100.0)]
+	var info := "%d fps   %.1fM tris   %d draws   engine %.0f ms   script %.1f ms   res %d%%" % [Engine.get_frames_per_second(), tris, draws, cpu_ms, script_us / 1000.0, int(res_scale * 100.0)]
+	if not fixes_done.is_empty():
+		info += "\nSpeed fixes: " + ", ".join(PackedStringArray(fixes_done))
+	lbl_fps.text = info
 	var ammo := "%d / %d" % [clip, reserve]
 	if reloading > 0.0:
 		ammo = "Reloading"
