@@ -212,11 +212,17 @@ func _ready() -> void:
 	build_grass()
 	build_player()
 	build_audio()
+	load_sounds()
+	build_stage2_world()
 	build_ui()
+	build_stage2_ui()
 	get_viewport().size_changed.connect(layout)
 	layout()
 	apply_quality()
 	reset_player()
+	load_zombies()
+	spawn_zombies()
+	spawn_pickups()
 	show_menu(true)
 
 
@@ -1405,6 +1411,40 @@ func make_sound(dur: float, kind: String) -> AudioStreamWAV:
 				if ph < 0.25 and fmod(ph, 0.06) < 0.035:
 					chirp = 1.0
 				s = sin(TAU * 4300.0 * t) * chirp * 0.12
+			"groan", "scream", "attack":
+				var f0 := 85.0
+				if kind == "scream":
+					f0 = 260.0
+				elif kind == "attack":
+					f0 = 140.0
+				var f := f0 * (1.0 + 0.25 * sin(TAU * 0.7 * t) + 0.08 * sin(TAU * 7.0 * t))
+				phase += TAU * f / rate
+				var buzz := fmod(phase / TAU, 1.0) * 2.0 - 1.0
+				lp += (buzz * 0.7 + (randf() * 2.0 - 1.0) * 0.5 - lp) * 0.12
+				var swell := sin(PI * float(i) / n)
+				s = lp * swell * 1.6
+			"hurt":
+				lp += (randf() * 2.0 - 1.0 - lp) * 0.2
+				phase += TAU * lerpf(240.0, 120.0, t / dur) / rate
+				s = (lp * 0.6 + sin(phase) * 0.5) * fall
+			"flesh":
+				lp += (randf() * 2.0 - 1.0 - lp) * 0.25
+				s = lp * fall * 1.8
+			"knife":
+				var nz := randf() * 2.0 - 1.0
+				s = (nz - lp) * fall * 0.6
+				lp = nz
+			"kick", "thunk":
+				lp += (randf() * 2.0 - 1.0 - lp) * 0.1
+				phase += TAU * lerpf(110.0, 45.0, t / dur) / rate
+				s = (lp * 1.5 + sin(phase) * 0.8) * fall
+			"heart":
+				var b := 0.0
+				if t < 0.12:
+					b = sin(PI * t / 0.12)
+				elif t > 0.2 and t < 0.3:
+					b = sin(PI * (t - 0.2) / 0.1) * 0.7
+				s = sin(TAU * 55.0 * t) * b * 0.9
 			"bell":
 				s = (sin(TAU * 220.0 * t) + sin(TAU * 440.0 * t) * 0.6 + sin(TAU * 662.0 * t) * 0.4 + sin(TAU * 1104.0 * t) * 0.25) * exp(-t * 1.2) * 0.35
 		data.encode_s16(i * 2, int(clampf(s, -1.0, 1.0) * 32000.0))
@@ -1426,6 +1466,15 @@ func build_audio() -> void:
 	sounds["click"] = make_sound(0.05, "click")
 	sounds["reload"] = make_sound(0.7, "reload")
 	sounds["bell"] = make_sound(3.5, "bell")
+	sounds["groan"] = make_sound(1.6, "groan")
+	sounds["scream"] = make_sound(1.2, "scream")
+	sounds["attack"] = make_sound(0.5, "attack")
+	sounds["hurt"] = make_sound(0.35, "hurt")
+	sounds["flesh"] = make_sound(0.18, "flesh")
+	sounds["knife"] = make_sound(0.25, "knife")
+	sounds["kick"] = make_sound(0.2, "kick")
+	sounds["thunk"] = make_sound(0.12, "thunk")
+	sounds["heart"] = make_sound(0.45, "heart")
 	for i in 8:
 		var ap := AudioStreamPlayer.new()
 		add_child(ap)
@@ -1435,27 +1484,42 @@ func build_audio() -> void:
 	wind.volume_db = -10.0
 	add_child(wind)
 	wind.play()
+	wind_player = wind
 	var cr := AudioStreamPlayer.new()
 	cr.stream = make_sound(2.8, "crickets")
 	cr.volume_db = -16.0
 	add_child(cr)
 	cr.play()
+	cricket_player = cr
 
 
 func play_sfx(id: String, vol: float = 0.0, pit: float = 1.0) -> void:
-	if not sounds.has(id):
+	var stream: AudioStream = null
+	if multi_sounds.has(id):
+		var arr: Array = multi_sounds[id]
+		stream = arr[randi() % arr.size()]
+	elif sounds.has(id):
+		stream = sounds[id]
+	if stream == null:
 		return
+	var a: AudioStreamPlayer = null
 	for ap in sfx_players:
-		var a: AudioStreamPlayer = ap
-		if not a.playing:
-			a.stream = sounds[id]
-			a.volume_db = vol
-			a.pitch_scale = pit
-			a.play()
-			return
-	var a0: AudioStreamPlayer = sfx_players[0]
-	a0.stream = sounds[id]
-	a0.play()
+		var c: AudioStreamPlayer = ap
+		if not c.playing:
+			a = c
+			break
+	if a == null:
+		a = sfx_players[0]
+	a.stream = stream
+	a.volume_db = vol
+	a.pitch_scale = pit
+	var ln := stream.get_length()
+	if id == "step" and ln > 1.5:
+		a.play(randf_range(0.0, ln - 0.6))
+		slice_stop[a] = Time.get_ticks_msec() + 380
+	else:
+		a.play()
+		slice_stop.erase(a)
 
 
 # =====================================================================
@@ -1597,11 +1661,11 @@ func build_ui() -> void:
 	title.label_settings.shadow_color = Color(0.6, 0.05, 0.03, 0.6)
 	title.label_settings.shadow_size = 12
 	left.add_child(title)
-	var sub := mk_label("Stage 1: the journey to the bell tower.\nZombies and stealth arrive in the next update.", 19)
+	var sub := mk_label("Reach the bell tower. The villagers are infected.\nSneak through the tall grass or fight your way in.", 19)
 	left.add_child(sub)
 	menu_btns["start"] = mk_menu_button("Start", start_game)
 	left.add_child(menu_btns["start"])
-	var help := mk_label("Left thumb: walk (push fully to run)\nMove the phone to look, or drag on the right\nFIRE shoots. Light is your flashlight.", 17)
+	var help := mk_label("Left thumb: walk (push fully to run). Move the phone to look.\nCrouch in tall grass to hide. Stone lures them away.\nSneak behind one for a silent Takedown. Gunshots wake them.", 17)
 	left.add_child(help)
 	menu_btns["aim"] = mk_menu_button("", _toggle_aim)
 	right.add_child(menu_btns["aim"])
@@ -1705,7 +1769,10 @@ func _cycle_quality() -> void:
 
 
 func refresh_menu() -> void:
-	set_btn_text("start", "Resume" if started else "Start")
+	if dead or finished:
+		set_btn_text("start", "Play again")
+	else:
+		set_btn_text("start", "Resume" if started else "Start")
 	set_btn_text("aim", "Aim: " + ("Gyroscope + drag" if use_gyro else "Touch drag only"))
 	set_btn_text("invx", "Invert turn: " + ("On" if inv_x else "Off"))
 	set_btn_text("invy", "Invert tilt: " + ("On" if inv_y else "Off"))
@@ -1751,6 +1818,8 @@ func layout() -> void:
 	menu_box.reset_size()
 	var ms := menu_box.get_combined_minimum_size()
 	menu_box.position = (vs - ms) * 0.5
+	if hp_back != null:
+		layout2()
 
 
 var groups: Dictionary = {"trees": [], "grass": [], "rocks": [], "terrain": [], "particles": []}
@@ -1884,6 +1953,8 @@ func show_menu(v: bool) -> void:
 
 
 func start_game() -> void:
+	if dead or finished:
+		restart_game()
 	started = true
 	show_menu(false)
 	show_msg("Reach the bell tower", 3.0)
@@ -2042,6 +2113,10 @@ func press_button(id: String) -> void:
 			show_menu(true)
 		"level":
 			pitch = 0.0
+		"stone":
+			throw_stone()
+		"act":
+			do_action()
 
 
 func _input(event: InputEvent) -> void:
@@ -2098,6 +2173,10 @@ func _input(event: InputEvent) -> void:
 					set_crouch(not crouching)
 				KEY_L:
 					toggle_torch()
+				KEY_Q:
+					throw_stone()
+				KEY_E:
+					do_action()
 				KEY_ESCAPE:
 					show_menu(true)
 
@@ -2169,7 +2248,11 @@ func aim() -> Dictionary:
 				var py := o.y + d.y * proj
 				if py < height_at(tv.x, tv.y) + 4.0:
 					best = proj
-	return {"point": o + d * best, "dist": best, "sky": best >= 89.0}
+	var zr := aim_zombies(o, d, best)
+	var hz = zr[0]
+	if hz != null:
+		best = zr[2]
+	return {"point": o + d * best, "dist": best, "sky": best >= 89.0 and hz == null, "zb": hz, "zone": zr[1]}
 
 
 func fire() -> void:
@@ -2192,7 +2275,10 @@ func fire() -> void:
 	muzzle_flash.visible = true
 	flash_t = 0.05
 	var h := aim()
-	if not h["sky"]:
+	make_noise(player.position.x, player.position.z, 40.0, true)
+	if h["zb"] != null:
+		damage_zombie(h["zb"], h["zone"], h["point"])
+	elif not h["sky"]:
 		var p: CPUParticles3D = impacts[impact_i % impacts.size()]
 		impact_i += 1
 		p.global_position = h["point"]
@@ -2270,17 +2356,21 @@ func _frame(delta: float) -> void:
 			g += "\nTurn left and right: one number should jump. If the view turns the wrong way in game, switch Invert or Swap."
 		else:
 			g += "\nNo data yet. Move the phone. If it stays at 0.00 your phone has no gyroscope; use touch drag."
-		g += "\nScanned models: %d loaded, %d skipped (too heavy for a phone)" % [models_ok, models_skipped]
+		g += "\n" + z_status
+		g += "\nReal sound files: %d" % sound_files
 		lbl_gyro.text = g
 		if not started:
 			player.rotation.y = sin(Time.get_ticks_msec() * 0.0001) * 0.45
 	if playing:
 		update_player(delta)
+		update_zombies(delta)
+		update_world2(delta)
 	update_effects(delta)
 	if playing:
 		if not skip_laser:
 			update_laser()
 		update_hud()
+		update_hud2(delta)
 		adapt_resolution(delta)
 	laser.visible = playing
 	dot.visible = dot.visible and playing
@@ -2333,6 +2423,21 @@ func update_player(delta: float) -> void:
 	var moved := np.distance_to(old)
 	player.position = Vector3(np.x, height_at(np.x, np.y), np.y)
 	step_d += moved
+	move_speed = moved / maxf(delta, 0.0001)
+	if move_speed < 0.2:
+		noise_r = 0.0
+	elif crouching:
+		noise_r = 1.4
+	elif sprint:
+		noise_r = 13.0
+	else:
+		noise_r = 5.0
+	in_grass = false
+	for tp in tall_patches:
+		var tpv: Vector3 = tp
+		if Vector2(player.position.x - tpv.x, player.position.z - tpv.y).length() < tpv.z:
+			in_grass = true
+			break
 	if step_d > (1.3 if sprint else 0.85):
 		step_d = 0.0
 		play_sfx("step", -16.0 if crouching else -7.0, randf_range(0.85, 1.15))
@@ -2357,7 +2462,8 @@ func update_player(delta: float) -> void:
 			finished = true
 			play_sfx("bell", 2.0)
 			Input.vibrate_handheld(400)
-			show_msg("You reached the bell tower.\nStage 1 complete. Zombies arrive in the next update.", 8.0)
+			show_msg("You reached the bell tower.\nYou survived the village.", 8.0)
+			lbl_results.text = "YOU SURVIVED\nVillagers down: %d    Silent takedowns: %d" % [kills, stealth_kills]
 
 
 func update_effects(delta: float) -> void:
@@ -2380,6 +2486,13 @@ func update_effects(delta: float) -> void:
 		msg_t -= delta
 		if msg_t < 1.0:
 			lbl_msg.modulate.a = maxf(0.0, msg_t)
+	if not slice_stop.is_empty():
+		var now := Time.get_ticks_msec()
+		for k in slice_stop.keys():
+			if now > int(slice_stop[k]):
+				var sp: AudioStreamPlayer = k
+				sp.stop()
+				slice_stop.erase(k)
 
 
 func update_laser() -> void:
@@ -2426,3 +2539,1144 @@ func update_hud() -> void:
 	if crouching:
 		st += "   Crouched"
 	lbl_status.text = st
+
+
+# =====================================================================
+# STAGE 2: real zombies (Mixamo files), stealth, health, pickups, real sounds
+# =====================================================================
+class Z:
+	var root: Node3D
+	var inst: Node3D
+	var ap: AnimationPlayer
+	var skel: Skeleton3D
+	var snd: AudioStreamPlayer3D
+	var bh := -1
+	var bneck := -1
+	var bhip := -1
+	var blf := -1
+	var brf := -1
+	var x := 0.0
+	var z := 0.0
+	var yaw := 0.0
+	var hp := 3
+	var state := "idle"
+	var alert := false
+	var aware := 0.0
+	var timer := 0.0
+	var t := 0.0
+	var home := Vector2.ZERO
+	var home2 := Vector2.ZERO
+	var patrol := false
+	var target := Vector2.ZERO
+	var walk_spd := 0.55
+	var run_spd := 2.0
+	var base_speed := 1.0
+	var dead := false
+	var atk := 0.0
+	var hit_done := false
+	var cur := ""
+	var slow := 0.0
+	var groan := 5.0
+	var face := 0.0
+	var has_face := false
+	var fall := 0.0
+
+const LOOP_KINDS := ["idle", "walk", "run", "crawl"]
+const SOUND_ORDER := [
+	["heart", ["heart"]],
+	["bell", ["bell", "church"]],
+	["reload", ["reload", "magazine"]],
+	["click", ["empty", "dry-fire", "dry fire", "click"]],
+	["knife", ["knife", "stab", "blade", "slash", "sword"]],
+	["crickets", ["cricket", "insect"]],
+	["fire_loop", ["campfire", "crackl", "bonfire", "fireplace"]],
+	["scream", ["scream", "roar", "shriek"]],
+	["attack", ["bite", "biting", "attack", "eat"]],
+	["hurt", ["hurt", "pain", "grunt", "damage", "male-"]],
+	["flesh", ["flesh", "impact", "splat", "gore", "blood", "hit"]],
+	["kick", ["kick", "punch"]],
+	["step", ["footstep", "step"]],
+	["ambient", ["ambience", "ambient", "wind", "night", "forest", "atmosphere", "nature", "horror"]],
+	["groan", ["groan", "growl", "moan", "zombie", "monster", "creature"]],
+	["thunk", ["rock", "stone", "thud", "throw"]],
+	["shot", ["gunshot", "gun-shot", "gun_shot", "pistol", "shot", "gun", "revolver"]],
+]
+
+var zchar: PackedScene = null
+var zlib: AnimationLibrary = null
+var z_skel_path := ""
+var z_scale := 1.0
+var z_yoff := 0.0
+var z_ready := false
+var z_status := "Zombies: no zombie files found in the repo"
+var zombies: Array = []
+var hp := 100.0
+var hurt_t := 0.0
+var dead := false
+var kills := 0
+var stealth_kills := 0
+var noise_r := 0.0
+var move_speed := 0.0
+var in_grass := false
+var act_target: Z = null
+var act_kind := ""
+var stone := MeshInstance3D.new()
+var stone_v := Vector3.ZERO
+var stone_cd := 0.0
+var pickups: Array = []
+var m_ammo: StandardMaterial3D
+var m_herb: StandardMaterial3D
+var hurt_rect := ColorRect.new()
+var hp_back: Panel
+var hp_fill: ColorRect
+var marks: Array = []
+var lbl_stealth: Label
+var multi_sounds: Dictionary = {}
+var sound_files := 0
+var slice_stop: Dictionary = {}
+var beat_t := 0.0
+var blood: Array = []
+var blood_i := 0
+var wind_player: AudioStreamPlayer
+var cricket_player: AudioStreamPlayer
+
+
+# ---------------- file discovery ----------------
+func scan_res(exts: Array) -> Array:
+	var out: Array = []
+	for f in DirAccess.get_files_at("res://"):
+		var n: String = f
+		if n.ends_with(".import"):
+			n = n.substr(0, n.length() - 7)
+		elif n.ends_with(".remap"):
+			n = n.substr(0, n.length() - 6)
+		if exts.has(n.get_extension().to_lower()) and not out.has(n):
+			out.append(n)
+	return out
+
+
+func find_first(n: Node, cls: String) -> Node:
+	if n.is_class(cls):
+		return n
+	for c in n.get_children():
+		var r := find_first(c, cls)
+		if r != null:
+			return r
+	return null
+
+
+func find_all(n: Node, cls: String, out: Array) -> void:
+	if n.is_class(cls):
+		out.append(n)
+	for c in n.get_children():
+		find_all(c, cls, out)
+
+
+func rel_xform(root: Node, n: Node) -> Transform3D:
+	var t := Transform3D.IDENTITY
+	var c: Node = n
+	while c != null:
+		if c is Node3D:
+			t = (c as Node3D).transform * t
+		if c == root:
+			break
+		c = c.get_parent()
+	return t
+
+
+func anim_kind(fname: String) -> String:
+	var n := fname.to_lower()
+	if n.contains("crawl"):
+		return "crawl"
+	if n.contains("neck"):
+		return "grab"
+	if n.contains("idle"):
+		return "idle"
+	if n.contains("walk"):
+		return "walk"
+	if n.contains("run"):
+		return "run"
+	if n.contains("attack") or n.contains("punch") or n.contains("bite") or n.contains("biting"):
+		return "attack"
+	if n.contains("scream"):
+		return "scream"
+	if n.contains("hit") or n.contains("reaction"):
+		return "hit"
+	if n.contains("death") or n.contains("dying") or n.contains("die"):
+		return "death"
+	return ""
+
+
+# ---------------- zombie model + animations ----------------
+func load_zombies() -> void:
+	var files := scan_res(["fbx", "glb", "gltf"])
+	if files.is_empty():
+		return
+	var char_path := ""
+	var anim_files := {}
+	for f in files:
+		var k := anim_kind(f)
+		if k == "":
+			if char_path == "":
+				char_path = f
+		elif not anim_files.has(k):
+			anim_files[k] = f
+	if char_path == "" and anim_files.has("idle"):
+		char_path = anim_files["idle"]
+	if char_path == "":
+		z_status = "Zombies: no body file found"
+		return
+	var ps = load("res://" + char_path)
+	if not (ps is PackedScene):
+		z_status = "Zombies: could not load " + char_path
+		return
+	var inst: Node = ps.instantiate()
+	var skel := find_first(inst, "Skeleton3D") as Skeleton3D
+	var meshes: Array = []
+	find_all(inst, "MeshInstance3D", meshes)
+	if skel == null or meshes.is_empty():
+		inst.free()
+		z_status = "Zombies: body file has no skeleton or mesh"
+		return
+	var box_all := AABB()
+	var first := true
+	for m in meshes:
+		var mi := m as MeshInstance3D
+		var ab := rel_xform(inst, mi) * mi.get_aabb()
+		if first:
+			box_all = ab
+			first = false
+		else:
+			box_all = box_all.merge(ab)
+	var h := box_all.size.y
+	z_scale = 1.78 / h if h > 0.01 else 1.0
+	z_yoff = -box_all.position.y * z_scale
+	z_skel_path = String(inst.get_path_to(skel))
+	inst.free()
+	zchar = ps
+	zlib = AnimationLibrary.new()
+	for k in anim_files:
+		var path: String = anim_files[k]
+		var sc = load("res://" + path)
+		if not (sc is PackedScene):
+			continue
+		var ai: Node = sc.instantiate()
+		var ap := find_first(ai, "AnimationPlayer") as AnimationPlayer
+		if ap != null:
+			var chosen: Animation = null
+			for an in ap.get_animation_list():
+				if String(an) != "RESET":
+					chosen = ap.get_animation(an)
+					break
+			if chosen != null:
+				var a := chosen.duplicate(true) as Animation
+				retarget(a, k)
+				if a.get_track_count() > 0:
+					zlib.add_animation(k, a)
+		ai.free()
+	z_ready = zlib.has_animation("idle") or zlib.has_animation("walk")
+	var names: Array = []
+	for n in zlib.get_animation_list():
+		names.append(String(n))
+	z_status = "Zombies: %s  (%s)" % [char_path, ", ".join(PackedStringArray(names))]
+	if not z_ready:
+		z_status += "  - need at least idle or walk"
+
+
+func retarget(a: Animation, kind: String) -> void:
+	var t := a.get_track_count() - 1
+	while t >= 0:
+		var ty := a.track_get_type(t)
+		if ty != Animation.TYPE_POSITION_3D and ty != Animation.TYPE_ROTATION_3D and ty != Animation.TYPE_SCALE_3D:
+			a.remove_track(t)
+			t -= 1
+			continue
+		var p := String(a.track_get_path(t))
+		var bone := ""
+		var i := p.rfind(":")
+		if i >= 0:
+			bone = p.substr(i + 1)
+		else:
+			bone = p.get_file()
+		if bone == "":
+			a.remove_track(t)
+			t -= 1
+			continue
+		a.track_set_path(t, NodePath(z_skel_path + ":" + bone))
+		if ty == Animation.TYPE_POSITION_3D and bone.ends_with("Hips") and LOOP_KINDS.has(kind):
+			var kc := a.track_get_key_count(t)
+			if kc > 0:
+				var v0: Vector3 = a.track_get_key_value(t, 0)
+				for k in kc:
+					var v: Vector3 = a.track_get_key_value(t, k)
+					a.track_set_key_value(t, k, Vector3(v0.x, v.y, v0.z))
+		t -= 1
+	if LOOP_KINDS.has(kind):
+		a.loop_mode = Animation.LOOP_LINEAR
+	else:
+		a.loop_mode = Animation.LOOP_NONE
+
+
+func anim_len(kind: String, def: float) -> float:
+	if zlib != null and zlib.has_animation(kind):
+		return zlib.get_animation(kind).length
+	return def
+
+
+func z_anim(z: Z, kind: String, blend: float = 0.25, restart: bool = false) -> void:
+	var k := kind
+	if not zlib.has_animation(k):
+		if kind == "death":
+			return
+		if k == "run" and zlib.has_animation("walk"):
+			k = "walk"
+		elif zlib.has_animation("idle"):
+			k = "idle"
+		elif zlib.has_animation("walk"):
+			k = "walk"
+		else:
+			return
+	if z.cur != k or restart:
+		z.ap.play(k, blend)
+		if restart:
+			z.ap.seek(0.0, true)
+		z.cur = k
+		z.ap.speed_scale = z.base_speed * (2.0 if (kind == "run" and k == "walk") else 1.0)
+
+
+func add_zombie(x: float, z: float, hp_: int, patrol: bool, r: RandomNumberGenerator) -> Z:
+	var p := collide(x, z, 0.45)
+	var zb := Z.new()
+	zb.x = p.x
+	zb.z = p.y
+	zb.home = p
+	zb.home2 = Vector2(path_x(p.y - 14.0) + r.randf_range(-2.0, 2.0), p.y - 14.0)
+	zb.patrol = patrol
+	zb.target = p
+	zb.yaw = r.randf() * TAU
+	zb.hp = hp_
+	zb.timer = r.randf_range(1.0, 5.0)
+	zb.walk_spd = r.randf_range(0.45, 0.65)
+	zb.run_spd = r.randf_range(1.7, 2.4)
+	zb.groan = r.randf_range(2.0, 12.0)
+	zb.base_speed = r.randf_range(0.88, 1.12)
+	zb.root = Node3D.new()
+	add_child(zb.root)
+	zb.inst = zchar.instantiate() as Node3D
+	var s := r.randf_range(0.93, 1.07)
+	zb.inst.scale = zb.inst.scale * z_scale * s
+	zb.inst.position = Vector3(0.0, z_yoff * s, 0.0)
+	zb.root.add_child(zb.inst)
+	var old := find_first(zb.inst, "AnimationPlayer")
+	if old != null:
+		var oap := old as AnimationPlayer
+		oap.active = false
+	zb.ap = AnimationPlayer.new()
+	zb.inst.add_child(zb.ap)
+	zb.ap.root_node = NodePath("..")
+	zb.ap.add_animation_library("", zlib)
+	zb.skel = find_first(zb.inst, "Skeleton3D") as Skeleton3D
+	for b in zb.skel.get_bone_count():
+		var bn := zb.skel.get_bone_name(b)
+		if bn.ends_with("Head"):
+			zb.bh = b
+		elif bn.ends_with("Neck"):
+			zb.bneck = b
+		elif bn.ends_with("Hips"):
+			zb.bhip = b
+		elif bn.ends_with("LeftFoot"):
+			zb.blf = b
+		elif bn.ends_with("RightFoot"):
+			zb.brf = b
+	var meshes: Array = []
+	find_all(zb.inst, "MeshInstance3D", meshes)
+	for m in meshes:
+		var mi := m as MeshInstance3D
+		if quality == 2:
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		else:
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	zb.snd = AudioStreamPlayer3D.new()
+	zb.snd.unit_size = 5.0
+	zb.snd.max_distance = 45.0
+	zb.snd.position = Vector3(0.0, 1.6, 0.0)
+	zb.root.add_child(zb.snd)
+	zb.root.position = Vector3(zb.x, height_at(zb.x, zb.z), zb.z)
+	zb.root.rotation.y = zb.yaw
+	z_anim(zb, "idle", 0.0)
+	if zb.ap.current_animation != "":
+		zb.ap.seek(r.randf() * 2.0, true)
+	zombies.append(zb)
+	return zb
+
+
+func z_group(r: RandomNumberGenerator, z0: float, z1: float, n: int, hp_: int, spread: float) -> void:
+	for i in n:
+		var zz := r.randf_range(z1, z0)
+		add_zombie(path_x(zz) + r.randf_range(-spread, spread), zz, hp_, false, r)
+
+
+func spawn_zombies() -> void:
+	for zb in zombies:
+		var zz: Z = zb
+		zz.root.queue_free()
+	zombies.clear()
+	act_target = null
+	if not z_ready:
+		return
+	var r := RandomNumberGenerator.new()
+	r.seed = 1234
+	z_group(r, -36.0, -86.0, 4, 3, 14.0)
+	z_group(r, -96.0, -170.0, 6, 3, 16.0)
+	for i in 2:
+		var pz := -105.0 - i * 32.0
+		add_zombie(path_x(pz) + r.randf_range(-1.5, 1.5), pz, 3, true, r)
+	z_group(r, -184.0, -268.0, 7, 4, 12.0)
+	add_zombie(path_x(-200.0), -200.0, 4, true, r)
+	for i in 5:
+		var a := float(i) / 5.0 * TAU + r.randf() * 0.3
+		var rad := r.randf_range(3.4, 6.0)
+		var zb := add_zombie(fire_pos.x + cos(a) * rad, fire_pos.z + sin(a) * rad, 4, false, r)
+		zb.has_face = true
+		zb.face = atan2(fire_pos.x - zb.x, fire_pos.z - zb.z)
+		zb.yaw = zb.face
+
+
+# ---------------- zombie brain ----------------
+func alert_z(z: Z, can_scream: bool) -> void:
+	if z.dead or z.alert:
+		return
+	z.alert = true
+	z.aware = 1.0
+	if can_scream and zlib.has_animation("scream") and randf() < 0.6:
+		z.state = "scream"
+		z.timer = minf(anim_len("scream", 1.5), 2.4)
+		z_anim(z, "scream", 0.2, true)
+		play_3d(z, "scream")
+	elif z.state != "hit":
+		z.state = "chase"
+	for ob in zombies:
+		var o: Z = ob
+		if o != z and not o.dead and not o.alert and Vector2(o.x - z.x, o.z - z.z).length() < 9.0:
+			o.alert = true
+			o.aware = 1.0
+			if o.state != "hit":
+				o.state = "chase"
+
+
+func make_noise(x: float, z: float, r: float, shot: bool) -> void:
+	for ob in zombies:
+		var o: Z = ob
+		if o.dead or o.alert:
+			continue
+		var d := Vector2(o.x - x, o.z - z).length()
+		if d > r:
+			continue
+		if shot and d < r * 0.5:
+			alert_z(o, true)
+		else:
+			o.state = "suspicious"
+			o.target = Vector2(x + randf_range(-1.0, 1.0), z + randf_range(-1.0, 1.0))
+			o.aware = maxf(o.aware, 0.6)
+			o.timer = 7.0
+
+
+func update_zombies(delta: float) -> void:
+	act_target = null
+	act_kind = ""
+	var best_d := 99.0
+	var spotted := false
+	var max_aware := 0.0
+	var threat := 99.0
+	var px := player.position.x
+	var pz := player.position.z
+	var pfx := -sin(player.rotation.y)
+	var pfz := -cos(player.rotation.y)
+	for zb in zombies:
+		var z: Z = zb
+		var dx := px - z.x
+		var dz := pz - z.z
+		var dist := maxf(0.001, sqrt(dx * dx + dz * dz))
+		var near := dist < 75.0
+		z.root.visible = near
+		z.ap.active = near
+		if not near:
+			continue
+		z.t += delta
+		if z.dead:
+			if not zlib.has_animation("death"):
+				z.fall = minf(1.0, z.fall + delta * 1.8)
+				z.root.rotation.x = -z.fall * 1.45
+			continue
+		if z.slow > 0.0:
+			z.slow -= delta
+		if not z.alert and z.state != "hit":
+			var fdot := (sin(z.yaw) * dx + cos(z.yaw) * dz) / dist
+			var rng := 20.0
+			if crouching:
+				rng *= 0.55
+			if torch_on:
+				rng *= 1.8
+			if in_grass and crouching:
+				rng *= 0.3
+			rng *= 1.15 if move_speed > 0.3 else 0.85
+			var gain := 0.0
+			if fdot > 0.35 and dist < rng:
+				gain += 1.5 * (1.0 - dist / rng) + 0.25
+			if noise_r > 0.0 and dist < noise_r:
+				gain += 1.4 * (1.0 - dist / noise_r) + 0.3
+			if dist < 1.4 and not crouching:
+				gain += 1.2
+			if gain > 0.0:
+				z.aware = minf(1.0, z.aware + gain * delta * 0.85)
+				if z.aware > 0.35:
+					if z.state != "suspicious":
+						z.state = "suspicious"
+						z.timer = 6.0
+					z.target = Vector2(px, pz)
+			else:
+				z.aware = maxf(0.0, z.aware - delta * 0.1)
+			if z.aware >= 1.0:
+				alert_z(z, true)
+		if not z.alert:
+			max_aware = maxf(max_aware, z.aware)
+		elif dist < 30.0:
+			spotted = true
+			threat = minf(threat, dist)
+		var go := false
+		var tx := 0.0
+		var tz := 0.0
+		var spd := 0.0
+		var anim := "idle"
+		match z.state:
+			"idle":
+				z.timer -= delta
+				if z.has_face:
+					z.yaw = lerp_angle(z.yaw, z.face, minf(1.0, delta * 2.0))
+				if z.timer <= 0.0:
+					z.timer = randf_range(3.0, 8.0)
+					if z.patrol:
+						z.target = z.home2 if z.target.distance_to(z.home2) > 1.0 else z.home
+						z.state = "walk"
+					elif not z.has_face and randf() < 0.5:
+						z.target = z.home + Vector2(randf_range(-6.0, 6.0), randf_range(-6.0, 6.0))
+						z.state = "walk"
+			"walk":
+				anim = "walk"
+				go = true
+				tx = z.target.x
+				tz = z.target.y
+				spd = z.walk_spd
+				if Vector2(z.x, z.z).distance_to(z.target) < 0.7:
+					z.state = "idle"
+					z.timer = randf_range(2.0, 6.0)
+			"suspicious":
+				if Vector2(z.x, z.z).distance_to(z.target) > 1.0:
+					anim = "walk"
+					go = true
+					tx = z.target.x
+					tz = z.target.y
+					spd = z.walk_spd * 1.3
+				else:
+					z.timer -= delta
+					z.yaw += sin(z.t * 1.3) * delta * 0.9
+				if z.timer <= 0.0 and z.aware < 0.7:
+					z.state = "walk"
+					z.target = z.home
+					z.aware *= 0.5
+			"scream":
+				anim = "scream"
+				z.yaw = lerp_angle(z.yaw, atan2(dx, dz), minf(1.0, delta * 5.0))
+				z.timer -= delta
+				if z.timer <= 0.0:
+					z.state = "chase"
+			"chase":
+				anim = "run"
+				go = true
+				tx = px
+				tz = pz
+				spd = z.run_spd * (0.45 if z.slow > 0.0 else 1.0)
+				if dist < 1.3:
+					z.state = "attack"
+					z.atk = 0.0
+					z.hit_done = false
+					z_anim(z, "attack", 0.15, true)
+			"attack":
+				anim = "attack"
+				z.yaw = lerp_angle(z.yaw, atan2(dx, dz), minf(1.0, delta * 6.0))
+				z.atk += delta
+				if z.atk > 0.55 and not z.hit_done:
+					z.hit_done = true
+					if dist < 1.8:
+						hurt_player(randf_range(12.0, 18.0))
+						play_3d(z, "attack")
+				if z.atk > minf(anim_len("attack", 1.4), 2.2):
+					if dist < 1.6:
+						z.atk = 0.0
+						z.hit_done = false
+						z_anim(z, "attack", 0.1, true)
+					else:
+						z.state = "chase"
+			"hit":
+				anim = "hit"
+				z.timer -= delta
+				if z.timer <= 0.0:
+					z.state = "chase" if z.alert else "suspicious"
+					z.target = Vector2(px, pz)
+		if go:
+			var ddx := tx - z.x
+			var ddz := tz - z.z
+			var dd := sqrt(ddx * ddx + ddz * ddz)
+			if dd > 0.05:
+				z.yaw = lerp_angle(z.yaw, atan2(ddx, ddz), minf(1.0, delta * 4.0))
+				var step := minf(dd, spd * delta)
+				z.x += sin(z.yaw) * step
+				z.z += cos(z.yaw) * step
+		for ob in zombies:
+			var o: Z = ob
+			if o == z or o.dead:
+				continue
+			var ox := z.x - o.x
+			var oz := z.z - o.z
+			var od := sqrt(ox * ox + oz * oz)
+			if od < 0.7 and od > 0.0001:
+				z.x += ox / od * (0.7 - od) * 0.5
+				z.z += oz / od * (0.7 - od) * 0.5
+		if dist < 40.0:
+			var c := collide(z.x, z.z, 0.32)
+			z.x = c.x
+			z.z = c.y
+		z.root.position = Vector3(z.x, height_at(z.x, z.z), z.z)
+		z.root.rotation.y = z.yaw
+		z_anim(z, anim)
+		z.groan -= delta * (2.5 if z.alert else 1.0)
+		if z.groan <= 0.0:
+			z.groan = randf_range(4.0, 11.0)
+			if dist < 40.0:
+				play_3d(z, "groan")
+		if dist < 2.0 and not z.alert:
+			var back := (sin(z.yaw) * dx + cos(z.yaw) * dz) / dist
+			if back < -0.15 and dist < best_d:
+				best_d = dist
+				act_target = z
+				act_kind = "Takedown"
+		elif z.state == "hit" and dist < 3.4 and (-dx * pfx - dz * pfz) / dist > 0.4 and dist < best_d:
+			best_d = dist
+			act_target = z
+			act_kind = "Kick"
+	var ab: Panel = buttons["act"]
+	ab.visible = act_target != null
+	if act_target != null:
+		var lb := ab.get_child(0) as Label
+		lb.text = act_kind
+	var txt := "Exposed"
+	var col := INK
+	if spotted:
+		txt = "SPOTTED"
+		col = Color(1.0, 0.35, 0.3)
+	elif max_aware > 0.3:
+		txt = "Something heard you"
+		col = Color(0.88, 0.63, 0.29)
+	elif in_grass and crouching:
+		txt = "Hidden in the grass"
+		col = Color(0.5, 0.85, 0.35)
+	elif crouching:
+		txt = "Sneaking"
+	elif torch_on:
+		txt = "Exposed, light on"
+	lbl_stealth.text = txt
+	lbl_stealth.label_settings.font_color = col
+	if threat < 12.0:
+		beat_t -= delta
+		if beat_t <= 0.0:
+			play_sfx("heart", -4.0)
+			beat_t = 0.8
+
+
+func play_3d(z: Z, id: String) -> void:
+	var stream: AudioStream = null
+	if multi_sounds.has(id):
+		var arr: Array = multi_sounds[id]
+		stream = arr[randi() % arr.size()]
+	elif sounds.has(id):
+		stream = sounds[id]
+	if stream == null:
+		return
+	z.snd.stream = stream
+	z.snd.pitch_scale = randf_range(0.85, 1.1)
+	z.snd.play()
+
+
+# ---------------- combat ----------------
+func bone_pos(z: Z, idx: int, fallback: float) -> Vector3:
+	if idx >= 0:
+		return z.skel.global_transform * z.skel.get_bone_global_pose(idx).origin
+	return z.root.global_position + Vector3(0.0, fallback, 0.0)
+
+
+func ray_seg(o: Vector3, d: Vector3, a: Vector3, b: Vector3) -> Vector2:
+	var u := b - a
+	var cc := u.dot(u)
+	var w := o - a
+	var bb := d.dot(u)
+	var dd := d.dot(w)
+	var ee := u.dot(w)
+	var den := cc - bb * bb
+	var tc := 0.0
+	if den > 1e-6 and cc > 1e-8:
+		tc = (ee - bb * dd) / den
+	elif cc > 1e-8:
+		tc = ee / cc
+	tc = clampf(tc, 0.0, 1.0)
+	var q := a + u * tc
+	var s := maxf(0.0, (q - o).dot(d))
+	return Vector2(s, (o + d * s).distance_to(q))
+
+
+func aim_zombies(o: Vector3, d: Vector3, best: float) -> Array:
+	var hz: Z = null
+	var zone := ""
+	for zb in zombies:
+		var z: Z = zb
+		if z.dead or not z.root.visible:
+			continue
+		if Vector2(z.x - o.x, z.z - o.z).length() > best + 1.5:
+			continue
+		var head := bone_pos(z, z.bh, 1.65) + Vector3(0.0, 0.05, 0.0)
+		var neck := bone_pos(z, z.bneck, 1.5)
+		var hips := bone_pos(z, z.bhip, 1.0)
+		var lf := bone_pos(z, z.blf, 0.1)
+		var rf := bone_pos(z, z.brf, 0.1)
+		var r1 := ray_seg(o, d, head, head)
+		if r1.y < 0.15 and r1.x < best:
+			best = r1.x
+			hz = z
+			zone = "head"
+		var r2 := ray_seg(o, d, hips, neck)
+		if r2.y < 0.24 and r2.x < best:
+			best = r2.x
+			hz = z
+			zone = "body"
+		for foot in [lf, rf]:
+			var r3 := ray_seg(o, d, hips, foot)
+			if r3.y < 0.13 and r3.x < best:
+				best = r3.x
+				hz = z
+				zone = "legs"
+	return [hz, zone, best]
+
+
+func damage_zombie(z: Z, zone: String, point: Vector3) -> void:
+	var unaware := not z.alert
+	var dmg := 3 if zone == "head" else 1
+	if unaware:
+		dmg *= 2
+	z.hp -= dmg
+	spawn_blood(point)
+	play_sfx("flesh", -3.0, randf_range(0.9, 1.1))
+	if z.hp <= 0:
+		kill_zombie(z, zone == "head")
+		return
+	alert_z(z, false)
+	if zone == "head" or randf() < 0.35:
+		z.state = "hit"
+		z.timer = minf(anim_len("hit", 1.0), 1.6)
+		z_anim(z, "hit", 0.1, true)
+	if zone == "legs":
+		z.slow = 4.0
+	var a := atan2(z.x - player.position.x, z.z - player.position.z)
+	z.x += sin(a) * 0.25
+	z.z += cos(a) * 0.25
+
+
+func kill_zombie(z: Z, headshot: bool) -> void:
+	if z.dead:
+		return
+	z.dead = true
+	z.state = "dead"
+	kills += 1
+	z_anim(z, "death", 0.15, true)
+	play_3d(z, "groan")
+	if headshot:
+		show_msg("Headshot", 1.0)
+	var r := randf()
+	if r < 0.42:
+		make_pickup(z.x + 0.6, z.z, "ammo")
+	elif r < 0.54:
+		make_pickup(z.x + 0.6, z.z, "herb")
+
+
+func spawn_blood(point: Vector3) -> void:
+	if blood.is_empty():
+		return
+	var p: CPUParticles3D = blood[blood_i % blood.size()]
+	blood_i += 1
+	p.global_position = point
+	p.restart()
+
+
+func hurt_player(d: float) -> void:
+	if dead:
+		return
+	hp -= d
+	hurt_t = 0.6
+	recoil = 0.04
+	Input.vibrate_handheld(150)
+	play_sfx("hurt", -2.0, randf_range(0.9, 1.1))
+	if hp <= 0.0:
+		hp = 0.0
+		dead = true
+		lbl_results.text = "YOU DIED\nVillagers down: %d    Silent takedowns: %d" % [kills, stealth_kills]
+		show_menu(true)
+		layout()
+
+
+func do_action() -> void:
+	if act_target == null:
+		return
+	var z: Z = act_target
+	if act_kind == "Takedown":
+		play_sfx("knife", 0.0)
+		Input.vibrate_handheld(60)
+		stealth_kills += 1
+		spawn_blood(Vector3(z.x, height_at(z.x, z.z) + 1.5, z.z))
+		kill_zombie(z, false)
+		make_noise(z.x, z.z, 3.5, false)
+		show_msg("Silent takedown", 1.2)
+	else:
+		play_sfx("kick", 0.0)
+		Input.vibrate_handheld(80)
+		var fx := -sin(player.rotation.y)
+		var fz := -cos(player.rotation.y)
+		for ob in zombies:
+			var o: Z = ob
+			if o.dead:
+				continue
+			var dx := o.x - player.position.x
+			var dz := o.z - player.position.z
+			var d := sqrt(dx * dx + dz * dz)
+			if d > 3.6 or d < 0.01 or (dx * fx + dz * fz) / d < 0.4:
+				continue
+			o.hp -= 1
+			o.x += dx / d * 2.6
+			o.z += dz / d * 2.6
+			o.state = "hit"
+			o.timer = minf(anim_len("hit", 1.0), 1.6)
+			z_anim(o, "hit", 0.1, true)
+			if o.hp <= 0:
+				kill_zombie(o, false)
+	act_target = null
+
+
+# ---------------- stone, pickups ----------------
+func build_stage2_world() -> void:
+	var sm := SphereMesh.new()
+	sm.radius = 0.05
+	sm.height = 0.09
+	sm.radial_segments = 8
+	sm.rings = 4
+	stone.mesh = sm
+	stone.material_override = pbr_mat("rock", Color(0.4, 0.4, 0.4), 2.0)
+	stone.visible = false
+	add_child(stone)
+	m_ammo = StandardMaterial3D.new()
+	m_ammo.albedo_color = Color(0.25, 0.27, 0.15)
+	m_ammo.roughness = 0.7
+	m_herb = StandardMaterial3D.new()
+	m_herb.albedo_color = Color(0.2, 0.5, 0.15)
+	m_herb.roughness = 0.8
+	for i in 6:
+		var p := CPUParticles3D.new()
+		p.one_shot = true
+		p.emitting = false
+		p.amount = 16
+		p.lifetime = 0.6
+		p.explosiveness = 1.0
+		p.direction = Vector3.UP
+		p.spread = 70.0
+		p.initial_velocity_min = 1.0
+		p.initial_velocity_max = 3.0
+		p.gravity = Vector3(0.0, -7.0, 0.0)
+		p.scale_amount_min = 0.5
+		p.scale_amount_max = 1.3
+		var g := Gradient.new()
+		g.set_color(0, Color(0.45, 0.02, 0.02, 1.0))
+		g.set_color(1, Color(0.25, 0.0, 0.0, 0.0))
+		p.color_ramp = g
+		var q := QuadMesh.new()
+		q.size = Vector2(0.08, 0.08)
+		var pm := glow_mat(Color(1, 1, 1), true)
+		pm.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
+		q.material = pm
+		p.mesh = q
+		add_child(p)
+		blood.append(p)
+
+
+func throw_stone() -> void:
+	if stone_cd > 0.0 or stone.visible:
+		return
+	stone_cd = 2.2
+	var d := -cam.global_transform.basis.z
+	stone.global_position = cam.global_position + d * 0.4
+	stone_v = d * 15.0 + Vector3(0.0, 3.5, 0.0)
+	stone.visible = true
+	play_sfx("click", -14.0, 0.6)
+
+
+func make_pickup(x: float, z: float, kind: String) -> void:
+	var y := height_at(x, z)
+	var g := Node3D.new()
+	add_child(g)
+	if kind == "ammo":
+		box(g, Vector3(0.36, 0.2, 0.26), Vector3.ZERO, m_ammo)
+		box(g, Vector3(0.37, 0.04, 0.27), Vector3(0.0, 0.03, 0.0), m_win_lit)
+	else:
+		var pot := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.1
+		cm.bottom_radius = 0.08
+		cm.height = 0.14
+		pot.mesh = cm
+		pot.material_override = m_door
+		g.add_child(pot)
+		for i in 5:
+			var leaf := MeshInstance3D.new()
+			var lm := CylinderMesh.new()
+			lm.top_radius = 0.0
+			lm.bottom_radius = 0.04
+			lm.height = 0.3
+			leaf.mesh = lm
+			leaf.material_override = m_herb
+			leaf.position = Vector3(cos(i * 1.3) * 0.04, 0.2, sin(i * 1.3) * 0.04)
+			leaf.rotation = Vector3(sin(i * 1.7) * 0.4, 0.0, cos(i * 1.7) * 0.4)
+			g.add_child(leaf)
+	var glint := MeshInstance3D.new()
+	var q := QuadMesh.new()
+	q.size = Vector2(0.9, 0.9)
+	var gm := glow_mat(Color(1.2, 0.9, 0.4) if kind == "ammo" else Color(0.6, 1.4, 0.5), false)
+	gm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	q.material = gm
+	glint.mesh = q
+	glint.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	g.add_child(glint)
+	g.position = Vector3(x, y + 0.25, z)
+	pickups.append({"node": g, "x": x, "z": z, "y": y, "kind": kind, "taken": false})
+
+
+func spawn_pickups() -> void:
+	for p in pickups:
+		if not p["taken"]:
+			var nd: Node3D = p["node"]
+			nd.queue_free()
+	pickups.clear()
+	var r := RandomNumberGenerator.new()
+	r.seed = 77
+	var z := -22.0
+	while z > -300.0:
+		var side := -1.0 if r.randf() < 0.5 else 1.0
+		make_pickup(path_x(z) + side * r.randf_range(1.8, 4.5), z, "ammo")
+		z -= 26.0
+	for hz in [-75.0, -150.0, -215.0, -262.0]:
+		make_pickup(path_x(hz) + 3.0, hz, "herb")
+
+
+func update_world2(delta: float) -> void:
+	if stone_cd > 0.0:
+		stone_cd -= delta
+	if stone.visible:
+		stone_v.y -= 9.8 * delta
+		stone.global_position += stone_v * delta
+		var sp := stone.global_position
+		var hit := sp.y < height_at(sp.x, sp.z)
+		for ob in obstacles:
+			var mn: Vector2 = ob["min"]
+			var mx: Vector2 = ob["max"]
+			if sp.x > mn.x and sp.x < mx.x and sp.z > mn.y and sp.z < mx.y and sp.y < float(ob["top"]):
+				hit = true
+		if hit:
+			stone.visible = false
+			play_sfx("thunk", -2.0)
+			var p: CPUParticles3D = impacts[impact_i % impacts.size()]
+			impact_i += 1
+			p.global_position = sp
+			p.restart()
+			make_noise(sp.x, sp.z, 13.0, false)
+	for pk in pickups:
+		if pk["taken"]:
+			continue
+		var nd: Node3D = pk["node"]
+		nd.rotation.y += delta
+		nd.position.y = float(pk["y"]) + 0.3 + sin(Time.get_ticks_msec() * 0.002 + float(pk["x"])) * 0.05
+		if Vector2(float(pk["x"]) - player.position.x, float(pk["z"]) - player.position.z).length() < 1.5:
+			pk["taken"] = true
+			nd.queue_free()
+			play_sfx("click", -6.0, 1.6)
+			if pk["kind"] == "ammo":
+				var n := randi_range(8, 12)
+				reserve += n
+				show_msg("+%d rounds" % n, 1.2)
+			else:
+				hp = minf(100.0, hp + 30.0)
+				show_msg("Herb: health restored", 1.2)
+
+
+# ---------------- HUD ----------------
+func build_stage2_ui() -> void:
+	hurt_rect.color = Color(0.55, 0.0, 0.0, 0.0)
+	hurt_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hurt_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(hurt_rect)
+	hud.move_child(hurt_rect, 0)
+	hp_back = Panel.new()
+	hp_back.size = Vector2(184.0, 14.0)
+	hp_back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0, 0, 0, 0.5)
+	sb.border_color = Color(0.91, 0.86, 0.75, 0.5)
+	sb.set_border_width_all(1)
+	hp_back.add_theme_stylebox_override("panel", sb)
+	hp_fill = ColorRect.new()
+	hp_fill.position = Vector2(2.0, 2.0)
+	hp_fill.size = Vector2(180.0, 10.0)
+	hp_fill.color = Color(0.35, 0.6, 0.23)
+	hp_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hp_back.add_child(hp_fill)
+	hud.add_child(hp_back)
+	lbl_stealth = mk_label("", 20)
+	lbl_stealth.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hud.add_child(lbl_stealth)
+	mk_hud_button("stone", "Stone", Vector2(80, 80), Color(0.07, 0.06, 0.05, 0.45))
+	mk_hud_button("act", "Takedown", Vector2(220, 64), Color(0.5, 0.08, 0.06, 0.78))
+	var ab: Panel = buttons["act"]
+	ab.visible = false
+	for i in 10:
+		var l := mk_label("?", 38)
+		l.visible = false
+		hud.add_child(l)
+		marks.append(l)
+
+
+func layout2() -> void:
+	var vs := get_viewport().get_visible_rect().size
+	hp_back.position = Vector2(lbl_status.position.x, 16.0)
+	lbl_status.position.y = 36.0
+	lbl_fps.position.y = 62.0
+	lbl_stealth.position = Vector2(vs.x * 0.5 - 220.0, 92.0)
+	lbl_stealth.size = Vector2(440.0, 30.0)
+	var cr: Control = buttons["crouch"]
+	place("stone", cr.position - Vector2(0.0, 94.0))
+	place("act", Vector2(vs.x * 0.5 - 110.0, vs.y - 92.0))
+
+
+func update_hud2(delta: float) -> void:
+	hp_fill.size.x = 180.0 * clampf(hp / 100.0, 0.0, 1.0)
+	if hp > 60.0:
+		hp_fill.color = Color(0.35, 0.6, 0.23)
+	elif hp > 30.0:
+		hp_fill.color = Color(0.78, 0.6, 0.16)
+	else:
+		hp_fill.color = Color(0.64, 0.09, 0.09)
+	if hurt_t > 0.0:
+		hurt_t -= delta
+	var a := maxf(0.0, hurt_t) * 0.75
+	if hp < 35.0:
+		a = maxf(a, 0.18 + sin(Time.get_ticks_msec() * 0.004) * 0.08)
+	hurt_rect.color.a = a
+	var k := 0
+	for zb in zombies:
+		if k >= marks.size():
+			break
+		var z: Z = zb
+		if z.dead or not z.root.visible:
+			continue
+		if not z.alert and z.aware < 0.12:
+			continue
+		var top := Vector3(z.x, height_at(z.x, z.z) + 2.2, z.z)
+		if top.distance_to(cam.global_position) > 40.0 or cam.is_position_behind(top):
+			continue
+		var l: Label = marks[k]
+		k += 1
+		l.visible = true
+		l.position = cam.unproject_position(top) - Vector2(10.0, 30.0)
+		if z.alert:
+			l.text = "!"
+			l.label_settings.font_color = Color(1.0, 0.3, 0.25)
+			l.modulate.a = 1.0
+		else:
+			l.text = "?"
+			l.label_settings.font_color = Color(0.88, 0.63, 0.29)
+			l.modulate.a = 0.35 + z.aware * 0.65
+	for i in range(k, marks.size()):
+		var l2: Label = marks[i]
+		l2.visible = false
+
+
+# ---------------- real sound files ----------------
+func load_sounds() -> void:
+	for f in scan_res(["wav", "mp3", "ogg"]):
+		var n: String = f.to_lower()
+		for pair in SOUND_ORDER:
+			var hit := false
+			for kw in pair[1]:
+				if n.contains(kw):
+					hit = true
+					break
+			if hit:
+				var st = load("res://" + f)
+				if st is AudioStream:
+					var key: String = pair[0]
+					if not multi_sounds.has(key):
+						multi_sounds[key] = []
+					multi_sounds[key].append(st)
+					sound_files += 1
+				break
+	if multi_sounds.has("ambient"):
+		if wind_player != null:
+			wind_player.stop()
+		var amb := AudioStreamPlayer.new()
+		var arr: Array = multi_sounds["ambient"]
+		amb.stream = arr[0]
+		amb.volume_db = -6.0
+		add_child(amb)
+		amb.finished.connect(amb.play)
+		amb.play()
+	if multi_sounds.has("crickets"):
+		if cricket_player != null:
+			cricket_player.stop()
+		var crp := AudioStreamPlayer.new()
+		var arr2: Array = multi_sounds["crickets"]
+		crp.stream = arr2[0]
+		crp.volume_db = -10.0
+		add_child(crp)
+		crp.finished.connect(crp.play)
+		crp.play()
+	if multi_sounds.has("fire_loop"):
+		var fp := AudioStreamPlayer3D.new()
+		var arr3: Array = multi_sounds["fire_loop"]
+		fp.stream = arr3[0]
+		fp.unit_size = 4.0
+		fp.max_distance = 35.0
+		fp.position = fire_pos + Vector3(0.0, 0.8, 0.0)
+		add_child(fp)
+		fp.finished.connect(fp.play)
+		fp.play()
+	var rv := AudioEffectReverb.new()
+	rv.room_size = 0.65
+	rv.damping = 0.6
+	rv.wet = 0.12
+	rv.dry = 1.0
+	rv.spread = 1.0
+	AudioServer.add_bus_effect(0, rv)
+
+
+func restart_game() -> void:
+	dead = false
+	finished = false
+	hp = 100.0
+	kills = 0
+	stealth_kills = 0
+	reset_player()
+	spawn_zombies()
+	spawn_pickups()
+	lbl_results.text = ""
